@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: pytest-celery
+Version: 0.0.0
+Summary: pytest-celery a shim pytest plugin to enable celery.contrib.pytest
+Home-page: https://github.com/graingert/pytest-celery
+License: BSD
+Author: Thomas Grainger
+Author-email: pytest-celery@graingert.co.uk
+Classifier: License :: OSI Approved :: BSD License
+Requires-Dist: celery >= 4.4.0
