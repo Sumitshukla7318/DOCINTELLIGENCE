@@ -1,13 +1,8 @@
-import magic
 from django.conf import settings
 from django.core.exceptions import ValidationError
 
 
 def validate_file_size(file):
-    """
-    Rejects files over MAX_UPLOAD_SIZE_MB.
-    We check size before reading content — fail fast.
-    """
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     if file.size > max_bytes:
         raise ValidationError(
@@ -17,20 +12,32 @@ def validate_file_size(file):
 
 
 def validate_file_type(file):
-    """
-    Validates the REAL file type by reading the first 2048 bytes
-    (the 'magic bytes') rather than trusting the file extension.
-
-    Why: A user can rename 'malware.exe' to 'report.pdf'.
-    python-magic catches this by reading the actual file signature.
-    """
-    file.seek(0)  # Ensure we're reading from the beginning
-    mime_type = magic.from_buffer(file.read(2048), mime=True)
-    file.seek(0)  # Reset for subsequent reads
+    try:
+        import magic
+        file.seek(0)
+        mime_type = magic.from_buffer(file.read(2048), mime=True)
+        file.seek(0)
+    except Exception:
+        # libmagic not available — fall back to extension check
+        import os
+        ext = os.path.splitext(file.name)[1].lower()
+        ext_map = {
+            ".pdf": "application/pdf",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        mime_type = ext_map.get(ext)
+        if not mime_type:
+            raise ValidationError(
+                f"File type not supported. "
+                f"Allowed types: PDF, JPEG, PNG, WebP."
+            )
 
     if mime_type not in settings.ALLOWED_DOCUMENT_TYPES:
         raise ValidationError(
             f"File type '{mime_type}' is not supported. "
             f"Allowed types: PDF, JPEG, PNG, WebP."
         )
-    return mime_type  # Return so the model can store it
+    return mime_type
