@@ -1,5 +1,0 @@
-[build]
-buildCommand = "pip install -r requirements/production.txt"
-
-[deploy]
-startCommand = "gunicorn config.wsgi:application"
