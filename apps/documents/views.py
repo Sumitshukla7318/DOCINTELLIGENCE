@@ -241,31 +241,48 @@ class DocumentQAView(APIView):
         question = serializer.validated_data["question"]
 
         try:
-            from .utils import extract_text_from_document, truncate_text
+            from .utils import extract_text_from_document, truncate_text, download_file_to_temp
             from .ai import answer_question
-            raw_text = extract_text_from_document(document.file.path, document.mime_type)
-            text_for_ai = truncate_text(raw_text)
-            answer = answer_question(text_for_ai, question)
+            import os
+
+            # Download file — handles both local and Cloudinary
+            temp_path = download_file_to_temp(document.file)
+
+            try:
+                raw_text = extract_text_from_document(temp_path, document.mime_type)
+                text_for_ai = truncate_text(raw_text)
+                answer = answer_question(text_for_ai, question)
+            finally:
+                # Clean up temp file if downloaded from Cloudinary
+                try:
+                    local_path = document.file.path
+                    if local_path != temp_path:
+                        os.unlink(temp_path)
+                except NotImplementedError:
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass
+
         except Exception as exc:
             logger.exception("Q&A failed for document %s: %s", pk, exc)
             return Response(
                 {"detail": "Failed to process your question. Please try again."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        
+
+        # Save to Q&A history
         QAHistory.objects.create(
             document=document,
             question=question,
             answer=answer,
         )
 
-
         return Response({
             "document_id": str(document.id),
             "question": question,
             "answer": answer,
         })
-
 
 def handle_ratelimited(request, exception):
     from rest_framework.response import Response
