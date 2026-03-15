@@ -1,10 +1,18 @@
 from .base import *  # noqa
+import os
 import dj_database_url
 
 # --- Core ---
 DEBUG = False
 SECRET_KEY = env("SECRET_KEY")
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
+
+# Auto-include Railway domain — no manual ALLOWED_HOSTS needed
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
+railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+if railway_domain and railway_domain not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(railway_domain)
+if not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ["*"]
 
 # --- Database ---
 DATABASES = {
@@ -35,7 +43,7 @@ CLOUDINARY_STORAGE = {
 DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
 MEDIA_URL = "/media/"
 
-# --- File Upload Limits (same as base) ---
+# --- File Upload Limits ---
 MAX_UPLOAD_SIZE_MB = 20
 ALLOWED_DOCUMENT_TYPES = [
     "application/pdf",
@@ -57,7 +65,16 @@ SECURE_SSL_REDIRECT = True
 
 # --- CORS ---
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
+# Auto-include Railway domain in CORS
+if railway_domain:
+    railway_url = f"https://{railway_domain}"
+    if railway_url not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(railway_url)
 CORS_ALLOW_CREDENTIALS = True
+
+# --- Celery (inherit Redis URL from Railway) ---
+CELERY_BROKER_URL = env("REDIS_URL", default="redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = "django-db"
 
 # --- Logging ---
 LOGGING = {
@@ -91,14 +108,3 @@ LOGGING = {
         },
     },
 }
-
-
-# Then add to Railway environment variables
-
-# CLOUDINARY_URL=cloudinary://API_KEY:API_SECRET@CLOUD_NAME
-
-# And update `requirements.txt`
-
-# cloudinary==1.40.0
-# django-cloudinary-storage==0.3.0
-
