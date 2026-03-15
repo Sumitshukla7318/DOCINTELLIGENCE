@@ -35,43 +35,26 @@ def download_file_to_temp(file_field) -> str:
         return _download_from_url(file_field)
     
 def _download_from_url(file_field) -> str:
-    """Downloads file from Cloudinary using authenticated API."""
-    import cloudinary
-    import cloudinary.api
-    from django.conf import settings
+    """Downloads file from Cloudinary."""
+    url = file_field.url
+    logger.info("Downloading from: %s", url)
 
-    cloudinary.config(
-        cloudinary_url=settings.CLOUDINARY_STORAGE["CLOUDINARY_URL"]
-    )
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
 
-    file_name = file_field.name
-    logger.info("Downloading Cloudinary file: %s", file_name)
+    name = file_field.name or ""
+    ext = ".pdf"
+    if "." in name:
+        ext = "." + name.rsplit(".", 1)[-1].lower()
+    if len(ext) > 5:
+        ext = ".pdf"
 
-    # Use cloudinary admin API to get a direct download URL
-    try:
-        # This generates an authenticated download URL
-        result = cloudinary.utils.private_download_url(
-            file_name,
-            "pdf",
-            resource_type="image",
-            expires_at=int(__import__("time").time()) + 3600,
-        )
-        logger.info("Private download URL: %s", result)
-        response = requests.get(result, timeout=60)
-        if response.status_code == 200:
-            content = response.content
-            logger.info("Downloaded %d bytes", len(content))
-        else:
-            raise Exception(f"Download failed with status {response.status_code}")
-
-    except Exception as exc:
-        logger.exception("Cloudinary download failed: %s", exc)
-        raise Exception(f"Could not download file: {exc}")
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(content)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    tmp.write(response.content)
     tmp.flush()
     tmp.close()
+
+    logger.info("Downloaded %d bytes to: %s", len(response.content), tmp.name)
     return tmp.name
 
 def extract_text_from_document(file_path: str, mime_type: str) -> str:
