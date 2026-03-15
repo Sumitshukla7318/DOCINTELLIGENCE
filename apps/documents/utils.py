@@ -33,56 +33,75 @@ def download_file_to_temp(file_field) -> str:
             return _download_from_url(file_field)
     except NotImplementedError:
         return _download_from_url(file_field)
-
-
 def _download_from_url(file_field) -> str:
-    """Downloads file from Cloudinary using signed URL."""
+    """Downloads file from Cloudinary using admin API."""
     import cloudinary
-    import cloudinary.utils
+    import cloudinary.api
+    import cloudinary.uploader
     from django.conf import settings
 
+    # Configure cloudinary
+    cloudinary.config(
+        cloudinary_url=settings.CLOUDINARY_STORAGE["CLOUDINARY_URL"]
+    )
+
     file_name = file_field.name
+    logger.info("Downloading Cloudinary file: %s", file_name)
 
-    # Generate signed URL using Cloudinary SDK
-    try:
-        cloudinary.config(
-            cloudinary_url=settings.CLOUDINARY_STORAGE["CLOUDINARY_URL"]
-        )
-        # Generate a signed URL valid for 1 hour
-        signed_url, _ = cloudinary.utils.cloudinary_url(
-            file_name,
-            resource_type="raw",    # PDF files are "raw" not "image"
-            sign_url=True,
-            expires_at=int(__import__("time").time()) + 3600,
-        )
-        logger.info("Generated signed Cloudinary URL for: %s", file_name)
-    except Exception as exc:
-        logger.warning("Could not generate signed URL, trying direct URL: %s", exc)
-        signed_url = file_field.url
+    # Try both resource types — image and raw
+    content = None
+    for resource_type in ["image", "raw", "auto"]:
+        try:
+            url = cloudinary.utils.cloudinary_url(
+                file_name,
+                resource_type=resource_type,
+                sign_url=True,
+                expires_at=int(__import__("time").time()) + 3600,
+                secure=True,
+            )[0]
+            logger.info("Trying %s URL: %s", resource_type, url)
+            response = requests.get(url, timeout=60)
+            if response.status_code == 200:
+                content = response.content
+                logger.info(
+                    "Downloaded %d bytes using resource_type=%s",
+                    len(content), resource_type
+                )
+                break
+            else:
+                logger.warning(
+                    "Failed with resource_type=%s status=%s",
+                    resource_type, response.status_code
+                )
+        except Exception as exc:
+            logger.warning("resource_type=%s failed: %s", resource_type, exc)
+            continue
 
-    try:
-        response = requests.get(signed_url, timeout=60)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as exc:
-        logger.exception("Failed to download file: %s", exc)
-        raise Exception(f"Could not download file for processing: {exc}")
+    if not content:
+        # Last resort — try the raw file_field.url directly
+        try:
+            url = file_field.url
+            logger.info("Last resort — trying field URL: %s", url)
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            content = response.content
+        except Exception as exc:
+            raise Exception(f"Could not download file from Cloudinary: {exc}")
 
     # Detect extension
     name = file_name or ""
     ext = ".pdf"
     if "." in name:
         ext = "." + name.rsplit(".", 1)[-1].lower()
+    if len(ext) > 5 or ext == ".":
+        ext = ".pdf"
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-    tmp.write(response.content)
+    tmp.write(content)
     tmp.flush()
     tmp.close()
 
-    logger.info(
-        "Downloaded %d bytes to temp: %s",
-        len(response.content),
-        tmp.name,
-    )
+    logger.info("Saved to temp file: %s", tmp.name)
     return tmp.name
 
 
