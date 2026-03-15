@@ -1,3 +1,4 @@
+import os
 import re
 import logging
 import tempfile
@@ -7,49 +8,82 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+
 def download_file_to_temp(file_field) -> str:
     """
-    Downloads file from Cloudinary to temp or returns local path.
+    Downloads file to temp for processing.
+    In production always uses URL (Cloudinary).
+    In development uses local path.
     """
+    from django.conf import settings
+
+    # In production always download from URL
+    # Never trust file.path on Railway — filesystem is ephemeral
+    if not settings.DEBUG:
+        return _download_from_url(file_field)
+
+    # Development — try local path first
     try:
-        # Try local path first (development)
         path = file_field.path
-        logger.info("Using local file path: %s", path)
-        return path
+        if os.path.exists(path):
+            logger.info("Using local file path: %s", path)
+            return path
+        else:
+            logger.warning("Local file not found, downloading from URL: %s", path)
+            return _download_from_url(file_field)
     except NotImplementedError:
-        # Cloudinary — download to temp file
-        url = file_field.url
-        logger.info("Downloading from Cloudinary URL: %s", url)
+        return _download_from_url(file_field)
 
-        try:
-            response = requests.get(url, timeout=60)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as exc:
-            logger.exception("Failed to download file from Cloudinary: %s", exc)
-            raise Exception(f"Could not download file for processing: {exc}")
 
-        # Detect extension
-        ext = ".pdf"
-        if "image" in file_field.name:
-            ext = ".jpg"
-        name = file_field.name
-        if "." in name:
-            ext = "." + name.rsplit(".", 1)[-1]
+def _download_from_url(file_field) -> str:
+    """Downloads file from Cloudinary using signed URL."""
+    import cloudinary
+    import cloudinary.utils
+    from django.conf import settings
 
-        tmp = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=ext,
+    file_name = file_field.name
+
+    # Generate signed URL using Cloudinary SDK
+    try:
+        cloudinary.config(
+            cloudinary_url=settings.CLOUDINARY_STORAGE["CLOUDINARY_URL"]
         )
-        tmp.write(response.content)
-        tmp.flush()
-        tmp.close()
-
-        logger.info(
-            "Downloaded %d bytes to temp file: %s",
-            len(response.content),
-            tmp.name,
+        # Generate a signed URL valid for 1 hour
+        signed_url, _ = cloudinary.utils.cloudinary_url(
+            file_name,
+            resource_type="raw",    # PDF files are "raw" not "image"
+            sign_url=True,
+            expires_at=int(__import__("time").time()) + 3600,
         )
-        return tmp.name
+        logger.info("Generated signed Cloudinary URL for: %s", file_name)
+    except Exception as exc:
+        logger.warning("Could not generate signed URL, trying direct URL: %s", exc)
+        signed_url = file_field.url
+
+    try:
+        response = requests.get(signed_url, timeout=60)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        logger.exception("Failed to download file: %s", exc)
+        raise Exception(f"Could not download file for processing: {exc}")
+
+    # Detect extension
+    name = file_name or ""
+    ext = ".pdf"
+    if "." in name:
+        ext = "." + name.rsplit(".", 1)[-1].lower()
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    tmp.write(response.content)
+    tmp.flush()
+    tmp.close()
+
+    logger.info(
+        "Downloaded %d bytes to temp: %s",
+        len(response.content),
+        tmp.name,
+    )
+    return tmp.name
 
 
 def extract_text_from_document(file_path: str, mime_type: str) -> str:

@@ -36,8 +36,12 @@ import cloudinary.api
 
 INSTALLED_APPS += ["cloudinary_storage", "cloudinary"]
 
+# CLOUDINARY_STORAGE = {
+#     "CLOUDINARY_URL": env("CLOUDINARY_URL")
+# }
 CLOUDINARY_STORAGE = {
-    "CLOUDINARY_URL": env("CLOUDINARY_URL")
+    "CLOUDINARY_URL": env("CLOUDINARY_URL"),
+    "RESOURCE_TYPE": "raw",    # Store all files as raw, not image
 }
 
 DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
