@@ -1,3 +1,4 @@
+import os
 import logging
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
@@ -21,14 +22,15 @@ logger = logging.getLogger(__name__)
 def process_document(self, document_id: str):
     """
     Orchestrates full AI processing pipeline for a document:
-    1. Extract raw text from file
-    2. Summarize with OpenAI
-    3. Extract entities with OpenAI
-    4. Mark COMPLETED
-    5. Trigger webhook (Phase 5)
+    1. Download file (from Cloudinary in production, local path in dev)
+    2. Extract raw text
+    3. Summarize with Groq
+    4. Extract entities with Groq
+    5. Mark COMPLETED
+    6. Trigger webhook if configured
     """
     from .models import Document
-    from .utils import extract_text_from_document, truncate_text
+    from .utils import extract_text_from_document, truncate_text, download_file_to_temp
     from .ai import summarize_document, extract_entities
 
     logger.info("Starting processing for document: %s", document_id)
@@ -49,18 +51,25 @@ def process_document(self, document_id: str):
         document.status = Document.Status.PROCESSING
         document.save(update_fields=["status", "updated_at"])
 
-        # --- Extract text ---
-        file_path = document.file.path
-        raw_text = extract_text_from_document(file_path, document.mime_type)
-        text_for_ai = truncate_text(raw_text)
+        # --- Download file to temp (handles both local + Cloudinary) ---
+        temp_path = download_file_to_temp(document.file)
 
-        # --- Summarize ---
-        logger.info("Running summarization for document %s", document_id)
-        summary = summarize_document(text_for_ai)
+        try:
+            # --- Extract text ---
+            raw_text = extract_text_from_document(temp_path, document.mime_type)
+            text_for_ai = truncate_text(raw_text)
 
-        # --- Extract entities ---
-        logger.info("Running entity extraction for document %s", document_id)
-        entities = extract_entities(text_for_ai)
+            # --- Summarize ---
+            logger.info("Running summarization for document %s", document_id)
+            summary = summarize_document(text_for_ai)
+
+            # --- Extract entities ---
+            logger.info("Running entity extraction for document %s", document_id)
+            entities = extract_entities(text_for_ai)
+
+        finally:
+            # Always clean up temp file whether success or failure
+            _cleanup_temp_file(document, temp_path)
 
         # --- Mark COMPLETED ---
         document.status = Document.Status.COMPLETED
@@ -75,7 +84,9 @@ def process_document(self, document_id: str):
 
         logger.info("Document %s processed successfully.", document_id)
 
-        # Phase 5: trigger_webhook.delay(document_id) goes here
+        # --- Trigger webhook if configured ---
+        if document.webhook_url:
+            trigger_webhook.delay(document_id)
 
     except SoftTimeLimitExceeded:
         logger.error("Soft time limit exceeded for document %s", document_id)
@@ -87,18 +98,6 @@ def process_document(self, document_id: str):
         if self.request.retries >= self.max_retries:
             _mark_failed(document_id, str(exc))
         raise
-
-
-def _mark_failed(document_id: str, error_message: str):
-    from .models import Document
-    try:
-        Document.objects.filter(id=document_id).update(
-            status=Document.Status.FAILED,
-            error_message=error_message,
-            updated_at=timezone.now(),
-        )
-    except Exception as exc:
-        logger.exception("Failed to mark document %s as failed: %s", document_id, exc)
 
 
 @shared_task(
@@ -113,12 +112,9 @@ def _mark_failed(document_id: str, error_message: str):
 )
 def trigger_webhook(self, document_id: str):
     """
-    Delivers a webhook notification after document processing completes.
-
-    Separated from process_document intentionally:
-    - Webhook failure should never affect document processing status
-    - Webhook retries are independent of processing retries
-    - Clean separation of concerns
+    Delivers webhook notification after document processing completes.
+    Separated from process_document so webhook failures never
+    affect document processing status.
     """
     from .models import Document
     from .webhooks import deliver_webhook
@@ -139,7 +135,6 @@ def trigger_webhook(self, document_id: str):
 
     try:
         deliver_webhook(document)
-        # Mark as delivered so we don't re-send on task replay
         Document.objects.filter(id=document_id).update(
             webhook_delivered=True,
         )
@@ -150,4 +145,41 @@ def trigger_webhook(self, document_id: str):
             "Webhook delivery failed for document %s (attempt %s/%s): %s",
             document_id, self.request.retries + 1, self.max_retries + 1, exc,
         )
-        raise  # Celery handles retry
+        raise
+
+
+def _mark_failed(document_id: str, error_message: str):
+    """Marks a document as FAILED with error message."""
+    from .models import Document
+    try:
+        Document.objects.filter(id=document_id).update(
+            status=Document.Status.FAILED,
+            error_message=error_message,
+            updated_at=timezone.now(),
+        )
+        logger.info("Marked document %s as FAILED: %s", document_id, error_message)
+    except Exception as exc:
+        logger.exception(
+            "Failed to mark document %s as failed: %s", document_id, exc
+        )
+
+
+def _cleanup_temp_file(document, temp_path: str):
+    """
+    Cleans up temp file if it was downloaded from Cloudinary.
+    For local storage, file.path == temp_path so nothing to delete.
+    """
+    try:
+        local_path = document.file.path
+        if local_path != temp_path:
+            os.unlink(temp_path)
+            logger.debug("Cleaned up temp file: %s", temp_path)
+    except NotImplementedError:
+        # Cloudinary — no local path, always clean up temp
+        try:
+            os.unlink(temp_path)
+            logger.debug("Cleaned up Cloudinary temp file: %s", temp_path)
+        except Exception as exc:
+            logger.warning("Failed to clean up temp file %s: %s", temp_path, exc)
+    except Exception as exc:
+        logger.warning("Failed to clean up temp file %s: %s", temp_path, exc)
