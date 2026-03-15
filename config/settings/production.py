@@ -7,27 +7,42 @@ SECRET_KEY = env("SECRET_KEY")
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 
 # --- Database ---
-# Railway provides DATABASE_URL automatically
 DATABASES = {
     "default": dj_database_url.config(
         default=env("DATABASE_URL"),
-        conn_max_age=600,        # Keep DB connections alive 10 min
-        conn_health_checks=True, # Drop stale connections automatically
+        conn_max_age=600,
+        conn_health_checks=True,
     )
 }
 
 # --- Static Files ---
-# Whitenoise serves static files without a separate web server
 MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
-# --- Media Files ---
-# In production use Cloudinary or keep local
-# For Railway local storage persists on the same dyno
+# --- Cloudinary Media Storage ---
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
+INSTALLED_APPS += ["cloudinary_storage", "cloudinary"]
+
+CLOUDINARY_STORAGE = {
+    "CLOUDINARY_URL": env("CLOUDINARY_URL")
+}
+
+DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+
+# --- File Upload Limits (same as base) ---
+MAX_UPLOAD_SIZE_MB = 20
+ALLOWED_DOCUMENT_TYPES = [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+]
 
 # --- Security Headers ---
 SECURE_BROWSER_XSS_FILTER = True
@@ -76,3 +91,14 @@ LOGGING = {
         },
     },
 }
+
+
+# Then add to Railway environment variables
+
+# CLOUDINARY_URL=cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+
+# And update `requirements.txt`
+
+# cloudinary==1.40.0
+# django-cloudinary-storage==0.3.0
+

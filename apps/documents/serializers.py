@@ -57,13 +57,18 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "created_at", "updated_at", "processed_at",
         )
 
-    def get_file_url(self, obj) -> str | None:
+    def get_file_url(self, obj):
         if not obj.file:
             return None
         request = self.context.get("request")
+        # Cloudinary returns absolute URLs directly
+        # Local storage needs request to build absolute URL
+        url = obj.file.url
+        if url.startswith("http"):
+            return url  # Cloudinary URL — already absolute
         if request:
-            return request.build_absolute_uri(obj.file.url)
-        return obj.file.url
+            return request.build_absolute_uri(url)
+        return url
     
 
     
