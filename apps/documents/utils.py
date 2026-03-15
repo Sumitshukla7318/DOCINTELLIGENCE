@@ -1,9 +1,55 @@
 import re
 import logging
+import tempfile
+import requests
 from pathlib import Path
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+def download_file_to_temp(file_field) -> str:
+    """
+    Downloads file from Cloudinary to temp or returns local path.
+    """
+    try:
+        # Try local path first (development)
+        path = file_field.path
+        logger.info("Using local file path: %s", path)
+        return path
+    except NotImplementedError:
+        # Cloudinary — download to temp file
+        url = file_field.url
+        logger.info("Downloading from Cloudinary URL: %s", url)
+
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            logger.exception("Failed to download file from Cloudinary: %s", exc)
+            raise Exception(f"Could not download file for processing: {exc}")
+
+        # Detect extension
+        ext = ".pdf"
+        if "image" in file_field.name:
+            ext = ".jpg"
+        name = file_field.name
+        if "." in name:
+            ext = "." + name.rsplit(".", 1)[-1]
+
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=ext,
+        )
+        tmp.write(response.content)
+        tmp.flush()
+        tmp.close()
+
+        logger.info(
+            "Downloaded %d bytes to temp file: %s",
+            len(response.content),
+            tmp.name,
+        )
+        return tmp.name
 
 
 def extract_text_from_document(file_path: str, mime_type: str) -> str:
@@ -13,7 +59,7 @@ def extract_text_from_document(file_path: str, mime_type: str) -> str:
         elif mime_type.startswith("image/"):
             return _extract_from_image(file_path)
         else:
-            logger.warning("Unsupported mime type for extraction: %s", mime_type)
+            logger.warning("Unsupported mime type: %s", mime_type)
             return ""
     except Exception as exc:
         logger.exception("Text extraction failed for %s: %s", file_path, exc)
@@ -29,7 +75,7 @@ def _extract_from_pdf(file_path: str) -> str:
         reader = pypdf.PdfReader(f)
 
         if reader.is_encrypted:
-            logger.warning("PDF is encrypted, skipping: %s", file_path)
+            logger.warning("PDF is encrypted: %s", file_path)
             return ""
 
         for page_num, page in enumerate(reader.pages):
@@ -58,40 +104,21 @@ def _extract_from_pdf(file_path: str) -> str:
 
 
 def _clean_text(text: str) -> str:
-    """
-    Cleans common PDF extraction artifacts:
-
-    1. Standalone line numbers (code listing PDFs)
-       "2\n3\n4\n91\n91\n92" → removed entirely
-
-    2. Inline numbers between content lines
-       "some text\n42\nmore text" → "some text\nmore text"
-
-    3. Single character garbage lines
-       "त र  क  र ा" style lines → removed
-       (symptom of bad font encoding in scanned PDFs)
-
-    4. Excessive whitespace and control characters
-    """
-
-    # Remove lines that are ONLY a number (standalone line numbers)
+    # Remove standalone line numbers
     text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
 
-    # Remove inline line numbers — single numbers between content
+    # Remove inline line numbers
     text = re.sub(r'\n\d+\n', '\n', text)
 
     # Collapse 3+ newlines into 2
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # Process line by line — remove garbage lines
     lines = text.split("\n")
     cleaned_lines = []
 
     for line in lines:
         words = line.split()
         if words:
-            # If more than 70% of words are single characters
-            # it's a garbage line (bad encoding artifact)
             single_char_count = sum(1 for w in words if len(w) == 1)
             ratio = single_char_count / len(words)
             if ratio > 0.7:
@@ -99,36 +126,21 @@ def _clean_text(text: str) -> str:
         cleaned_lines.append(line)
 
     cleaned = "\n".join(cleaned_lines)
-
-    # Normalize multiple spaces to single space
     cleaned = re.sub(r' {2,}', ' ', cleaned)
-
-    # Remove null bytes and control characters
     cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', cleaned)
 
     return cleaned
 
 
 def _is_garbage_text(text: str) -> bool:
-    """
-    Detects if extracted text is unreadable garbage.
-
-    Checks:
-    - Too short to be meaningful (under 50 chars)
-    - High ratio of single chars to total words
-      → symptom of bad font encoding
-    """
     if not text or len(text.strip()) < 50:
         return True
-
     words = text.split()
     if not words:
         return True
-
     single_chars = sum(1 for w in words if len(w) == 1)
     if len(words) > 10 and single_chars / len(words) > 0.5:
         return True
-
     return False
 
 
@@ -146,10 +158,6 @@ def _extract_from_image(file_path: str) -> str:
 
 
 def truncate_text(text: str, max_chars: int = 12000) -> str:
-    """
-    Truncates text to fit within Groq's context window.
-    Truncates at a word boundary to avoid cutting mid-word.
-    """
     if len(text) <= max_chars:
         return text
     truncated = text[:max_chars]
