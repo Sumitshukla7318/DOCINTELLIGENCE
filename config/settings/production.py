@@ -3,7 +3,7 @@ import os
 import dj_database_url
 
 # --- Core ---
-DEBUG = False
+DEBUG = True
 SECRET_KEY = env("SECRET_KEY")
 
 # Auto-include Railway domain — no manual ALLOWED_HOSTS needed
