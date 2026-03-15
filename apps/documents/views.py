@@ -183,7 +183,6 @@ class DocumentDetailView(generics.RetrieveDestroyAPIView):
         document.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-
 class DocumentQAView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -217,6 +216,12 @@ class DocumentQAView(APIView):
         ],
     )
     def post(self, request, pk):
+        import os
+        from django.conf import settings
+        from .utils import extract_text_from_document, truncate_text, download_file_to_temp
+        from .ai import answer_question
+
+        # --- Ownership check ---
         try:
             document = Document.objects.get(id=pk, owner=request.user)
         except Document.DoesNotExist:
@@ -225,6 +230,7 @@ class DocumentQAView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # --- Status check ---
         if document.status != Document.Status.COMPLETED:
             return Response(
                 {
@@ -236,33 +242,20 @@ class DocumentQAView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # --- Validate question ---
         serializer = DocumentQASerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         question = serializer.validated_data["question"]
 
+        # --- Extract text + answer ---
+        temp_path = None
         try:
-            from .utils import extract_text_from_document, truncate_text, download_file_to_temp
-            from .ai import answer_question
-            import os
-
-            # Download file — handles both local and Cloudinary
+            # Download file — handles both local (dev) and Cloudinary (prod)
             temp_path = download_file_to_temp(document.file)
 
-            try:
-                raw_text = extract_text_from_document(temp_path, document.mime_type)
-                text_for_ai = truncate_text(raw_text)
-                answer = answer_question(text_for_ai, question)
-            finally:
-                # Clean up temp file if downloaded from Cloudinary
-                try:
-                    local_path = document.file.path
-                    if local_path != temp_path:
-                        os.unlink(temp_path)
-                except NotImplementedError:
-                    try:
-                        os.unlink(temp_path)
-                    except Exception:
-                        pass
+            raw_text = extract_text_from_document(temp_path, document.mime_type)
+            text_for_ai = truncate_text(raw_text)
+            answer = answer_question(text_for_ai, question)
 
         except Exception as exc:
             logger.exception("Q&A failed for document %s: %s", pk, exc)
@@ -271,7 +264,25 @@ class DocumentQAView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        # Save to Q&A history
+        finally:
+            # Always clean up temp file
+            if temp_path:
+                try:
+                    if not settings.DEBUG:
+                        # Production — always a downloaded temp file
+                        os.unlink(temp_path)
+                    else:
+                        # Dev — only delete if it was downloaded not local
+                        try:
+                            local_path = document.file.path
+                            if local_path != temp_path:
+                                os.unlink(temp_path)
+                        except NotImplementedError:
+                            os.unlink(temp_path)
+                except Exception:
+                    pass
+
+        # --- Save to Q&A history ---
         QAHistory.objects.create(
             document=document,
             question=question,
@@ -283,7 +294,9 @@ class DocumentQAView(APIView):
             "question": question,
             "answer": answer,
         })
+    
 
+    
 def handle_ratelimited(request, exception):
     from rest_framework.response import Response
     return Response(
